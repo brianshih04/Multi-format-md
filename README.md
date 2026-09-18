@@ -1,130 +1,119 @@
-# Enterprise Multi-Format to Markdown Pipeline
+# Multi-Format to Markdown Pipeline
 
-將 PDF、Word、Excel、PowerPoint 與純文字文件遞迴轉換成適合匯入 AnythingLLM 的結構化 Markdown。程式會保留來源目錄層級，並透過 Manifest 只重做內容有變動的文件。
+在 Windows 11 本機批次將 PDF、Word、Excel、PowerPoint 與文字檔轉換成適合 AnythingLLM、RAG 與知識庫匯入的結構化 Markdown。
 
-## 支援格式
+專案同時提供拖放式桌面 GUI 與 CLI，能保留來源目錄結構、增量略過未變更文件，並透過可設定的 OpenAI-compatible Vision API 解讀圖片、表格、架構圖與掃描頁。
 
-- PDF：提取原生文字、內嵌圖片、偵測到的表格截圖，以及掃描頁／圖形密集頁面。
-- DOCX：依文件順序提取標題、段落、表格與內嵌圖片。
-- XLSX：逐工作表輸出 Markdown Table，保留公式文字。
-- PPTX：提取文字、表格、圖表資料與圖片；若 LibreOffice 可用，另將含視覺結構的投影片交由 VLM 解讀。
-- TXT：支援 UTF-8、UTF-16、Big5/CP950 與 CP1252 的常見文字檔。
-- DOC、XLS、PPT：先以 LibreOffice 轉成現代格式，再交給對應解析器。
+## 主要功能
 
-## 環境需求
+- 支援 `PDF`、`DOC`、`DOCX`、`XLS`、`XLSX`、`PPT`、`PPTX`、`TXT` 八種來源格式。
+- Windows GUI 支援拖放多個檔案或資料夾。
+- 可設定 API Key、Base URL、輸入格式、輸出格式、模型與並行數。
+- 自動呼叫目前端點的 `/models` API，讓使用者從實際可用模型中選擇。
+- 支援 Markdown、純文字與 JSON 輸出。
+- 遞迴掃描並保留原始子資料夾結構。
+- 使用 `mtime` 與 SHA-256 Manifest 進行增量更新。
+- HTTP 429、5xx、連線與逾時錯誤最多重試五次。
+- 個別文件失敗不會中斷整批轉換。
+- 舊版 Office 格式透過 LibreOffice 無介面轉檔。
 
-- Python 3.10+
-- [LibreOffice](https://www.libreoffice.org/download/download-libreoffice/)：舊版 `.doc`、`.xls`、`.ppt` 必須使用。PPTX 即使沒有 LibreOffice 仍可提取內容，但無法建立完整投影片預覽。
-- DeepSeek API Key：只有文件含有圖片或需要頁面視覺分析時才會呼叫 API。
+## 格式支援
 
-確認 LibreOffice CLI：
+| 來源 | 處理內容 | 額外需求 |
+|---|---|---|
+| PDF | 原生文字、圖片、表格截圖、掃描頁及圖形密集頁面 | 視覺內容需要 Vision API |
+| DOCX | 標題、段落、表格、內嵌圖片 | 圖片需要 Vision API |
+| XLSX | 所有工作表轉為 Markdown Table，保留公式文字 | 無 |
+| PPTX | 文字、表格、圖表數值、內嵌圖片及完整投影片視圖 | 完整投影片視圖需要 LibreOffice；視覺分析需要 Vision API |
+| TXT | UTF-8、UTF-16、Big5/CP950、CP1252 | 無 |
+| DOC / XLS / PPT | 先轉成 DOCX / XLSX / PPTX，再由對應解析器處理 | LibreOffice |
 
-```bash
-soffice --version
+## Windows 11 快速開始
+
+先安裝：
+
+- Python 3.10 或更新版本
+- [LibreOffice](https://www.libreoffice.org/download/download-libreoffice/)（舊版 Office 文件必須）
+
+下載並安裝專案：
+
+```powershell
+git clone https://github.com/brianshih04/Multi-format-md.git
+Set-Location .\Multi-format-md
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 ```
 
-Windows 若沒有把 LibreOffice 加入 PATH，程式也會檢查預設安裝位置：
+安裝完成後，雙擊 `run_gui.bat`。
+
+完整的環境檢查、API 設定、打包與疑難排解請參考 [installation.md](installation.md)。
+
+## GUI 使用方式
+
+1. 將文件或資料夾拖放到輸入區，也可使用「選擇檔案」或「選擇資料夾」。
+2. 勾選需要處理的來源格式。
+3. 選擇輸出目錄及 `Markdown`、`TXT` 或 `JSON` 格式。
+4. 輸入 API Key 與 Base URL。
+5. 按「查詢模型」，或展開模型選單，自動取得端點目前提供的模型。
+6. 選擇支援 Vision 的模型後按「開始轉換」。
+
+預設 DeepSeek 設定：
 
 ```text
-C:\Program Files\LibreOffice\program\soffice.exe
+Base URL: https://api.deepseek.com
+Model:    deepseek-flash
 ```
 
-## 安裝
+API Key 欄位使用遮罩顯示，GUI 不會自行儲存輸入內容。只有文件包含需要視覺分析的內容時才會發送圖片請求；純文字及一般 Excel 文件可在不呼叫 VLM 的情況下完成。
 
-建議建立虛擬環境：
-
-```bash
-python -m venv .venv
-```
+## CLI 使用方式
 
 Windows PowerShell：
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+.\.venv\Scripts\python.exe .\doc_to_md_pipeline.py `
+  --input-dir "C:\Documents\raw" `
+  --output-dir "C:\Documents\anythingllm" `
+  --workers 4 `
+  --output-format md `
+  --base-url "https://api.deepseek.com" `
+  --model "deepseek-flash"
 ```
 
-macOS / Linux：
+支援的參數：
 
-```bash
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-```
+| 參數 | 說明 |
+|---|---|
+| `--input-dir` | 要遞迴掃描的來源根目錄 |
+| `--output-dir` | 轉換結果、Manifest 與錯誤記錄的輸出目錄 |
+| `--workers` | 並行處理數，預設為 `4` |
+| `--output-format` | `md`、`txt` 或 `json`，預設為 `md` |
+| `--model` | Vision 模型 ID，預設為 `deepseek-flash` |
+| `--base-url` | OpenAI-compatible API Base URL |
+| `--force` | 忽略 Manifest 並重新處理所有文件 |
 
-在本機 `.env` 填入 `DEEPSEEK_API_KEY`。`.env` 已列入 `.gitignore`，請勿提交金鑰。
-
-## 使用方式
-
-### Windows 11 GUI（建議）
-
-第一次使用，在專案資料夾按右鍵選擇「在終端機中開啟」，執行：
+強制重建全部輸出：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
+.\.venv\Scripts\python.exe .\doc_to_md_pipeline.py `
+  --input-dir "C:\Documents\raw" `
+  --output-dir "C:\Documents\anythingllm" `
+  --force
 ```
 
-完成後雙擊 `run_gui.bat`。GUI 提供：
+## 增量更新
 
-- 拖放多個檔案或資料夾，並可勾選要處理的來源格式。
-- 選擇輸出目錄，以及 Markdown、純文字或 JSON 輸出。
-- 遮罩式 API Key 欄位；GUI 不會儲存輸入的金鑰。
-- 可編輯 Base URL，支援 DeepSeek 官方或其他 OpenAI-compatible 端點。
-- 使用 `/models` 自動查詢可用 LLM/VLM，再由使用者從下拉選單挑選；端點若未支援模型清單，仍可手動輸入模型 ID。
-- 背景轉換、進度列、即時結果與錯誤摘要。
+輸出根目錄會建立 `.conversion_manifest.json`：
 
-若 `.env` 或 Windows 環境已有 `DEEPSEEK_API_KEY`，API Key 欄位可留白。模型清單查詢會使用目前輸入的 Base URL 與金鑰。
+1. 修改時間、成功狀態、模型、端點、格式與輸出位置都相同：直接略過，不重新計算雜湊。
+2. 只有修改時間改變：計算 SHA-256；內容相同時只更新 Manifest。
+3. 內容、模型、Base URL 或輸出格式改變，或輸出遺失、前次失敗：重新轉換。
+4. 每完成一份文件就原子更新 Manifest，意外中止時仍保留已完成進度。
 
-### CLI
+同一目錄若有 `report.pdf` 與 `report.docx`，輸出會自動使用 `report.pdf.md` 與 `report.docx.md`，避免覆寫。
 
-```bash
-python doc_to_md_pipeline.py \
-  --input-dir ./raw_documents \
-  --output-dir ./anythingllm_knowledge_base \
-  --workers 4 \
-  --output-format md
-```
+## 輸出內容
 
-PowerShell 可寫成：
-
-```powershell
-python .\doc_to_md_pipeline.py `
-  --input-dir .\raw_documents `
-  --output-dir .\anythingllm_knowledge_base `
-  --workers 4
-```
-
-強制重新處理所有文件：
-
-```bash
-python doc_to_md_pipeline.py --input-dir ./raw_documents --output-dir ./anythingllm_knowledge_base --force
-```
-
-目前 DeepSeek V4.1 Flash 的正式 API 模型名稱是 `deepseek-flash`。如服務端日後改名，可直接覆寫：
-
-```bash
-python doc_to_md_pipeline.py \
-  --input-dir ./raw_documents \
-  --output-dir ./anythingllm_knowledge_base \
-  --model deepseek-flash \
-  --base-url https://api.deepseek.com
-```
-
-## 增量處理
-
-輸出根目錄的 `.conversion_manifest.json` 記錄來源 SHA-256、修改時間、目標路徑、狀態與轉換時間。
-
-1. `mtime`、成功狀態、輸出路徑都相同且 Markdown 存在：不計算雜湊，直接略過。
-2. `mtime` 改變時才計算 SHA-256；內容相同則只更新 `mtime`。
-3. 內容改變、輸出遺失、前次失敗或指定 `--force`：重新轉換。
-4. 每完成一個文件就以原子寫入方式更新 Manifest；單一文件失敗不會中止整批作業。
-
-不同格式若同目錄下使用相同檔名（例如 `report.pdf` 與 `report.docx`），輸出會自動命名為 `report.pdf.md` 與 `report.docx.md`，避免互相覆寫。
-
-## 輸出與錯誤
-
-每份 Markdown 都包含：
+Markdown 會包含來源追蹤資訊：
 
 ```yaml
 ---
@@ -134,30 +123,50 @@ model: "deepseek-flash"
 ---
 ```
 
-檔案級錯誤與不影響完成的警告會寫入輸出根目錄的 `conversion_error.log`。CLI 最後會列出掃描、略過、成功、失敗與 VLM 圖片請求數；只要有文件失敗，程序結束碼就是 `1`。
+錯誤與非致命警告會寫入輸出目錄的 `conversion_error.log`。CLI 與 GUI 都會顯示掃描、略過、成功、失敗及 VLM 圖片請求數。
+
+## 隱私與憑證
+
+- 文件解析在本機執行。
+- 只有擷取出的視覺內容會傳送到使用者設定的 API 端點。
+- API Key 不會寫入 Markdown、Manifest 或錯誤日誌。
+- `.env`、本機測試輸出、虛擬環境與打包產物均由 `.gitignore` 排除。
+- 請勿把含公司或個人資料的轉換輸出提交到公開儲存庫。
 
 ## 測試
 
-```bash
-python -m unittest discover -s tests -v
-```
-
-測試涵蓋首次處理、`mtime` 快速略過、雜湊略過、內容變更、輸出遺失、強制處理、同名輸出防碰撞，以及 PDF、DOCX、XLSX、PPTX 解析。若偵測到 LibreOffice，還會實際執行 DOC、XLS、PPT 產生與回讀的往返整合測試；未安裝時只略過這三項。
-
-## 建立 Windows 應用程式
-
-如需不顯示 Python 終端視窗的可攜執行檔，執行：
-
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-產物位於 `dist\MultiFormatMarkdown\MultiFormatMarkdown.exe`。LibreOffice 仍需另外安裝在使用者電腦上，才能處理舊版 Office 格式與完整投影片預覽。
+目前測試涵蓋：
 
-## API 相容性
+- 增量更新、雜湊略過、強制處理與輸出遺失。
+- 模型變更觸發重新轉換。
+- 同名來源的輸出防碰撞。
+- PDF、DOCX、XLSX、PPTX、TXT 解析。
+- 模型清單查詢與 JSON 輸出。
+- LibreOffice 可用時，實際執行 DOC、XLS、PPT 往返整合測試。
 
-本專案依 DeepSeek 官方 OpenAI-compatible Chat Completions 格式傳送 Base64 PNG，並對 HTTP 429、5xx、連線與逾時錯誤進行最多 5 次指數退避重試。官方參考：
+## 專案結構
 
+```text
+doc_to_md_gui.py       Windows 桌面 GUI
+doc_to_md_pipeline.py  CLI、掃描、解析、Vision API 與增量處理
+setup_windows.ps1      建立虛擬環境並安裝執行依賴
+run_gui.bat            雙擊啟動 GUI
+build_windows.ps1      使用 PyInstaller 建立 Windows 應用程式
+requirements.txt       執行依賴
+requirements-dev.txt   打包依賴
+installation.md        完整安裝與疑難排解
+spec.md                功能規格
+tests/                 自動測試
+```
+
+## 參考文件
+
+- [完整安裝指南](installation.md)
+- [功能規格](spec.md)
 - [DeepSeek Vision](https://api-docs.deepseek.com/guides/vision/)
-- [DeepSeek API quick start](https://api-docs.deepseek.com/)
-- [DeepSeek Lists Models](https://api-docs.deepseek.com/api/list-models/)
+- [DeepSeek Models API](https://api-docs.deepseek.com/api/list-models/)
+- [DeepSeek API Quick Start](https://api-docs.deepseek.com/)
