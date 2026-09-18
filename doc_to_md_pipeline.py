@@ -10,11 +10,13 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,6 +39,13 @@ SYSTEM_PROMPT = (
     "請條列出圖中所有文字標籤，並詳細描述各區塊的連接邏輯與技術規格。"
     "直接輸出 Markdown，不包含額外問候語。"
 )
+ENHANCE_SYSTEM_PROMPT = (
+    "你是一個嚴謹的 Markdown 文件編輯器。請只整理輸入內容的結構與排版，不得摘要、刪除、"
+    "翻譯、推測或新增任何資訊。可以統一標題層級、段落、清單與空白，但必須逐字保留所有"
+    "數值、日期、百分比、型號、專有名詞、URL、電子郵件與技術規格。直接輸出整理後的 Markdown，"
+    "不要加入說明、問候語或 Markdown code fence。"
+)
+DEFAULT_ENHANCE_CHUNK_CHARS = 24_000
 _SOFFICE_LOCK = threading.Lock()
 
 
@@ -118,6 +127,7 @@ class ConversionResult:
     job: FileJob
     success: bool
     image_requests: int = 0
+    enhancement_requests: int = 0
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -287,6 +297,7 @@ def create_scan_plan_from_items(
     output_format: str = "md",
     model: str | None = None,
     base_url: str | None = None,
+    processing_mode: str = "hybrid",
 ) -> ScanPlan:
     outputs = build_item_output_mapping(items, output_dir, output_suffix(output_format))
     jobs: list[FileJob] = []
@@ -305,6 +316,7 @@ def create_scan_plan_from_items(
             (model is None or entry.get("model") == model)
             and (base_url is None or entry.get("base_url") == base_url)
             and entry.get("output_format", "md") == output_format
+            and entry.get("processing_mode", "hybrid") == processing_mode
         )
 
         can_fast_skip = (
@@ -346,10 +358,13 @@ def create_scan_plan(
     manifest: Manifest,
     force: bool,
     output_format: str = "md",
+    processing_mode: str = "hybrid",
 ) -> ScanPlan:
     files = scan_supported_files(input_dir)
     items = [SourceItem(source, source.relative_to(input_dir)) for source in files]
-    return create_scan_plan_from_items(items, output_dir, manifest, force, output_format)
+    return create_scan_plan_from_items(
+        items, output_dir, manifest, force, output_format, processing_mode=processing_mode
+    )
 
 
 def normalize_image(data: bytes) -> bytes:
@@ -665,8 +680,7 @@ class VisionClient:
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
         self.model = model
 
-    def describe(self, image: bytes, label: str) -> str:
-        data_url = f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"
+    def _complete(self, messages: list[dict[str, Any]]) -> str:
         retrying = Retrying(
             stop=stop_after_attempt(5),
             wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -676,7 +690,18 @@ class VisionClient:
         response = retrying(
             self.client.chat.completions.create,
             model=self.model,
-            messages=[
+            messages=messages,
+            temperature=0,
+        )
+        content = response.choices[0].message.content
+        if not content:
+            raise RuntimeError("DeepSeek API 回傳空白內容")
+        return content.strip()
+
+    def describe(self, image: bytes, label: str) -> str:
+        data_url = f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"
+        return self._complete(
+            [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
@@ -685,13 +710,23 @@ class VisionClient:
                         {"type": "image_url", "image_url": {"url": data_url, "detail": "original"}},
                     ],
                 },
-            ],
-            temperature=0,
+            ]
         )
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("DeepSeek API 回傳空白內容")
-        return content.strip()
+
+    def enhance_markdown(self, markdown: str, chunk_index: int, chunk_count: int) -> str:
+        return self._complete(
+            [
+                {"role": "system", "content": ENHANCE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"以下是文件 Markdown 的第 {chunk_index}/{chunk_count} 段。"
+                        "請依規則整理，並完整保留原始資訊：\n\n"
+                        f"{markdown}"
+                    ),
+                },
+            ]
+        )
 
 
 def list_available_models(api_key: str, base_url: str) -> list[str]:
@@ -720,15 +755,214 @@ class VisionClientFactory:
 
     def get(self) -> VisionClient:
         if not self.api_key:
-            raise RuntimeError("文件包含視覺內容，但未設定 DEEPSEEK_API_KEY")
+            raise RuntimeError("需要 AI 處理，但未設定 DEEPSEEK_API_KEY")
         if not hasattr(self.local, "client"):
             self.local.client = VisionClient(self.api_key, self.base_url, self.model)
         return self.local.client
 
 
+def split_markdown_frontmatter(markdown: str) -> tuple[str, str]:
+    marker = "\n---\n\n"
+    if markdown.startswith("---\n") and marker in markdown[4:]:
+        boundary = markdown.find(marker, 4) + len(marker)
+        return markdown[:boundary], markdown[boundary:]
+    return "", markdown
+
+
+def _is_protected_markdown_block(block: str) -> bool:
+    stripped = block.strip()
+    if stripped.startswith("```") or stripped.startswith("~~~"):
+        return True
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    table_lines = sum(line.lstrip().startswith("|") and line.rstrip().endswith("|") for line in lines)
+    return table_lines / len(lines) >= 0.6
+
+
+def _split_large_text(text: str, max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines():
+        if len(line) > max_chars:
+            if current:
+                chunks.append("\n".join(current))
+                current = []
+                current_length = 0
+            chunks.extend(line[index : index + max_chars] for index in range(0, len(line), max_chars))
+            continue
+        additional = len(line) + (1 if current else 0)
+        if current and current_length + additional > max_chars:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += additional
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _split_markdown_blocks(body: str) -> list[str]:
+    blocks: list[str] = []
+    current: list[str] = []
+    fence_marker: str | None = None
+    for line in body.strip().splitlines():
+        stripped = line.lstrip()
+        if fence_marker:
+            current.append(line)
+            if stripped.startswith(fence_marker):
+                fence_marker = None
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence_marker = stripped[:3]
+            current.append(line)
+            continue
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current).strip())
+    return blocks
+
+
+def split_markdown_for_enhancement(
+    body: str, max_chars: int = DEFAULT_ENHANCE_CHUNK_CHARS
+) -> list[tuple[str, bool]]:
+    """Return ordered (content, should_enhance) segments while protecting tables and code."""
+    if max_chars < 1000:
+        raise ValueError("AI 整理分段大小不得小於 1000 字元")
+    blocks = _split_markdown_blocks(body)
+    segments: list[tuple[str, bool]] = []
+    buffer: list[str] = []
+    buffer_length = 0
+
+    def flush_buffer() -> None:
+        nonlocal buffer, buffer_length
+        if buffer:
+            segments.append(("\n\n".join(buffer), True))
+            buffer = []
+            buffer_length = 0
+
+    protected_flags = [_is_protected_markdown_block(block) for block in blocks]
+    for index, block in enumerate(blocks):
+        heading_for_protected_block = (
+            bool(re.fullmatch(r"#{1,6}\s+[^\n]+", block))
+            and index + 1 < len(blocks)
+            and protected_flags[index + 1]
+        )
+        if protected_flags[index] or heading_for_protected_block:
+            flush_buffer()
+            segments.append((block, False))
+            continue
+        if len(block) > max_chars:
+            flush_buffer()
+            segments.extend((chunk, True) for chunk in _split_large_text(block, max_chars) if chunk)
+            continue
+        additional = len(block) + (2 if buffer else 0)
+        if buffer and buffer_length + additional > max_chars:
+            flush_buffer()
+        buffer.append(block)
+        buffer_length += additional
+    flush_buffer()
+    return segments
+
+
+_CRITICAL_TOKEN_PATTERN = re.compile(
+    r"https?://[^\s<>()]+|"
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
+    r"\b(?:[A-Za-z]+[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*|\d+[A-Za-z][A-Za-z0-9_-]*)\b|"
+    r"(?<![\w])(?:0x[0-9A-Fa-f]+|\d[\d,]*(?:\.\d+)?%?)(?![\w])"
+)
+_CONTENT_TOKEN_PATTERN = re.compile(r"[\u3400-\u9fff]|[A-Za-z][A-Za-z'_-]*")
+
+
+def _critical_tokens(text: str) -> Counter[str]:
+    tokens: list[str] = []
+    for match in _CRITICAL_TOKEN_PATTERN.finditer(text):
+        token = match.group(0).rstrip(".,;:!?")
+        if re.fullmatch(r"\d[\d,]*(?:\.\d+)?%?", token):
+            token = token.replace(",", "")
+        tokens.append(token)
+    return Counter(tokens)
+
+
+def validate_enhanced_markdown(source: str, enhanced: str) -> tuple[bool, str]:
+    if not enhanced.strip():
+        return False, "模型回傳空白內容"
+    if _critical_tokens(source) != _critical_tokens(enhanced):
+        return False, "數值、網址、電子郵件或識別碼不一致"
+    source_tokens = Counter(token.lower() for token in _CONTENT_TOKEN_PATTERN.findall(source))
+    enhanced_tokens = Counter(token.lower() for token in _CONTENT_TOKEN_PATTERN.findall(enhanced))
+    if source_tokens:
+        retained = sum((source_tokens & enhanced_tokens).values()) / sum(source_tokens.values())
+        added = sum((enhanced_tokens - source_tokens).values())
+        if retained < 0.9 or added > max(5, int(sum(source_tokens.values()) * 0.15)):
+            return False, "文字內容差異超出安全範圍"
+    source_length = len(re.sub(r"\s+", "", source))
+    enhanced_length = len(re.sub(r"\s+", "", enhanced))
+    if source_length and not (0.65 <= enhanced_length / source_length <= 1.5):
+        return False, "整理後內容長度變化超出安全範圍"
+    return True, ""
+
+
+def _strip_markdown_fence(value: str) -> str:
+    stripped = value.strip()
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and lines[0].strip().lower() in {"```", "```markdown", "```md"} and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def enhance_markdown_document(
+    markdown: str,
+    vision_factory: VisionClientFactory,
+    max_chars: int = DEFAULT_ENHANCE_CHUNK_CHARS,
+) -> tuple[str, int, list[str]]:
+    frontmatter, body = split_markdown_frontmatter(markdown)
+    segments = split_markdown_for_enhancement(body, max_chars)
+    eligible_count = sum(should_enhance for _, should_enhance in segments)
+    if eligible_count == 0:
+        return markdown, 0, []
+
+    client = vision_factory.get()
+    enhanced_segments: list[str] = []
+    warnings: list[str] = []
+    request_count = 0
+    eligible_index = 0
+    for content, should_enhance in segments:
+        if not should_enhance:
+            enhanced_segments.append(content)
+            continue
+        eligible_index += 1
+        request_count += 1
+        try:
+            candidate = _strip_markdown_fence(
+                client.enhance_markdown(content, eligible_index, eligible_count)
+            )
+            valid, reason = validate_enhanced_markdown(content, candidate)
+            if not valid:
+                warnings.append(f"AI 整理第 {eligible_index}/{eligible_count} 段未通過驗證，保留原文：{reason}")
+                candidate = content
+        except Exception as exc:
+            warnings.append(
+                f"AI 整理第 {eligible_index}/{eligible_count} 段失敗，保留原文：{type(exc).__name__}: {exc}"
+            )
+            candidate = content
+        enhanced_segments.append(candidate)
+
+    enhanced_body = "\n\n".join(enhanced_segments).rstrip() + "\n"
+    return frontmatter + enhanced_body, request_count, warnings
+
+
 def assemble_markdown(
     relative_source: Path,
     model: str,
+    processing_mode: str,
     converted_at: str,
     extraction: ExtractionResult,
     vision_factory: VisionClientFactory,
@@ -754,6 +988,7 @@ def assemble_markdown(
         f"original_file: {yaml_string(relative_source.as_posix())}\n"
         f"converted_date: {yaml_string(converted_at)}\n"
         f"model: {yaml_string(model)}\n"
+        f"processing_mode: {yaml_string(processing_mode)}\n"
         "---"
     )
     return frontmatter + "\n\n" + "\n\n".join(body).rstrip() + "\n", image_requests
@@ -765,6 +1000,7 @@ def serialize_output(
     relative_source: Path,
     model: str,
     converted_at: str,
+    processing_mode: str = "hybrid",
 ) -> str:
     marker = "\n---\n\n"
     body = markdown.split(marker, 1)[1] if marker in markdown else markdown
@@ -774,7 +1010,8 @@ def serialize_output(
         return (
             f"Original file: {relative_source.as_posix()}\n"
             f"Converted date: {converted_at}\n"
-            f"Model: {model}\n\n"
+            f"Model: {model}\n"
+            f"Processing mode: {processing_mode}\n\n"
             f"{body}"
         )
     if output_format == "json":
@@ -783,6 +1020,7 @@ def serialize_output(
                 "original_file": relative_source.as_posix(),
                 "converted_date": converted_at,
                 "model": model,
+                "processing_mode": processing_mode,
                 "content_markdown": body.rstrip(),
             },
             ensure_ascii=False,
@@ -809,22 +1047,50 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 
 def convert_job(
-    job: FileJob, model: str, output_format: str, vision_factory: VisionClientFactory
+    job: FileJob,
+    model: str,
+    output_format: str,
+    processing_mode: str,
+    vision_factory: VisionClientFactory,
 ) -> ConversionResult:
     image_requests = 0
+    enhancement_requests = 0
     try:
         extraction = extract_document(job.source)
         image_requests = sum(part.kind == "image" for part in extraction.parts)
         converted_at = utc_now()
         markdown, _ = assemble_markdown(
-            job.relative_source, model, converted_at, extraction, vision_factory
+            job.relative_source, model, processing_mode, converted_at, extraction, vision_factory
         )
-        output = serialize_output(markdown, output_format, job.relative_source, model, converted_at)
+        warnings = list(extraction.warnings)
+        if processing_mode == "ai-enhanced":
+            markdown, enhancement_requests, enhancement_warnings = enhance_markdown_document(
+                markdown, vision_factory
+            )
+            warnings.extend(enhancement_warnings)
+        output = serialize_output(
+            markdown,
+            output_format,
+            job.relative_source,
+            model,
+            converted_at,
+            processing_mode,
+        )
         atomic_write_text(job.output, output)
-        return ConversionResult(job, True, image_requests=image_requests, warnings=extraction.warnings)
+        return ConversionResult(
+            job,
+            True,
+            image_requests=image_requests,
+            enhancement_requests=enhancement_requests,
+            warnings=warnings,
+        )
     except Exception as exc:
         return ConversionResult(
-            job, False, image_requests=image_requests, error=f"{type(exc).__name__}: {exc}"
+            job,
+            False,
+            image_requests=image_requests,
+            enhancement_requests=enhancement_requests,
+            error=f"{type(exc).__name__}: {exc}",
         )
 
 
@@ -854,6 +1120,7 @@ def update_manifest(
     model: str,
     base_url: str | None = None,
     output_format: str = "md",
+    processing_mode: str = "hybrid",
 ) -> None:
     key = result.job.relative_source.as_posix()
     entry: dict[str, Any] = {
@@ -864,6 +1131,7 @@ def update_manifest(
         "status": "success" if result.success else "failed",
         "model": model,
         "output_format": output_format,
+        "processing_mode": processing_mode,
     }
     if base_url:
         entry["base_url"] = base_url
@@ -899,6 +1167,9 @@ def run_pipeline_paths(
     manifest.load()
 
     output_format = getattr(args, "output_format", "md")
+    processing_mode = getattr(args, "processing_mode", "hybrid")
+    if processing_mode not in {"hybrid", "ai-enhanced"}:
+        raise ValueError(f"不支援的處理模式：{processing_mode}")
     items = collect_source_items(input_paths, allowed_extensions, excluded_paths=[output_dir])
     plan = create_scan_plan_from_items(
         items,
@@ -908,6 +1179,7 @@ def run_pipeline_paths(
         output_format,
         model=args.model,
         base_url=args.base_url,
+        processing_mode=processing_mode,
     )
     if plan.manifest_changed:
         manifest.save()
@@ -917,17 +1189,26 @@ def run_pipeline_paths(
     converted = 0
     failed = 0
     image_requests = 0
+    enhancement_requests = 0
 
     if plan.jobs:
         with ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="doc-to-md") as executor:
             futures = {
-                executor.submit(convert_job, job, args.model, output_format, vision_factory): job
+                executor.submit(
+                    convert_job,
+                    job,
+                    args.model,
+                    output_format,
+                    processing_mode,
+                    vision_factory,
+                ): job
                 for job in plan.jobs
             }
             with tqdm(total=len(futures), desc="轉換文件", unit="file", disable=quiet) as progress:
                 for future in as_completed(futures):
                     result = future.result()
                     image_requests += result.image_requests
+                    enhancement_requests += result.enhancement_requests
                     if result.success:
                         converted += 1
                         for warning in result.warnings:
@@ -941,6 +1222,7 @@ def run_pipeline_paths(
                         args.model,
                         base_url=args.base_url,
                         output_format=output_format,
+                        processing_mode=processing_mode,
                     )
                     manifest.save()
                     progress.update(1)
@@ -953,6 +1235,7 @@ def run_pipeline_paths(
         "converted": converted,
         "failed": failed,
         "image_requests": image_requests,
+        "enhancement_requests": enhancement_requests,
     }
     setattr(args, "run_summary", summary)
     if not quiet:
@@ -962,6 +1245,7 @@ def run_pipeline_paths(
         print(f"  成功轉換數: {converted}")
         print(f"  失敗檔案數: {failed}")
         print(f"  VLM 圖片請求數: {image_requests}")
+        print(f"  AI 整理請求數: {enhancement_requests}")
         if failed:
             print(f"  錯誤記錄: {output_dir / ERROR_LOG_FILENAME}")
     close_logger(logger)
@@ -993,7 +1277,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="md",
         help="輸出格式（預設：md）",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek 視覺模型（預設：{DEFAULT_MODEL}）")
+    parser.add_argument(
+        "--processing-mode",
+        choices=("hybrid", "ai-enhanced"),
+        default="hybrid",
+        help="處理模式：hybrid 或轉換後再由 AI 整理的 ai-enhanced（預設：hybrid）",
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek AI 模型（預設：{DEFAULT_MODEL}）")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"DeepSeek API Base URL（預設：{DEFAULT_BASE_URL}）")
     return parser
 

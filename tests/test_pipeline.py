@@ -95,6 +95,19 @@ class IncrementalScanTests(unittest.TestCase):
         )
         self.assertEqual(len(second.jobs), 1)
 
+    def test_processing_mode_change_queues_unchanged_file(self):
+        first = pipeline.create_scan_plan(self.input_dir, self.output_dir, self.manifest, False)
+        self.mark_success(first.jobs[0])
+        items = [pipeline.SourceItem(self.source, self.source.relative_to(self.input_dir))]
+        second = pipeline.create_scan_plan_from_items(
+            items,
+            self.output_dir,
+            self.manifest,
+            False,
+            processing_mode="ai-enhanced",
+        )
+        self.assertEqual(len(second.jobs), 1)
+
 
 class MappingTests(unittest.TestCase):
     def test_same_stem_uses_extension_to_avoid_collision(self):
@@ -257,6 +270,7 @@ class OutputAndApiTests(unittest.TestCase):
             markdown, "json", Path("a.txt"), pipeline.DEFAULT_MODEL, "2026-01-01T00:00:00Z"
         )
         self.assertIn('"content_markdown": "# Hello"', rendered)
+        self.assertIn('"processing_mode": "hybrid"', rendered)
 
     def test_model_list_is_sorted_and_deduplicated(self):
         fake_response = SimpleNamespace(
@@ -266,6 +280,72 @@ class OutputAndApiTests(unittest.TestCase):
         with patch("openai.OpenAI", return_value=fake_client):
             models = pipeline.list_available_models("secret", "https://example.test/v1")
         self.assertEqual(models, ["model-a", "model-z"])
+
+
+class AiEnhancedTests(unittest.TestCase):
+    def test_tables_are_protected_from_ai_enhancement(self):
+        body = "# Weekly report\n\nNarrative text.\n\n| Name | Value |\n| --- | --- |\n| Clock | 100 MHz |"
+        segments = pipeline.split_markdown_for_enhancement(body, max_chars=1000)
+        self.assertTrue(any(eligible for _, eligible in segments))
+        protected = [content for content, eligible in segments if not eligible]
+        self.assertEqual(len(protected), 1)
+        self.assertIn("100 MHz", protected[0])
+
+    def test_sheet_heading_next_to_table_is_also_protected(self):
+        body = "## 工作表：Overview\n\n| Part | Count |\n| --- | --- |\n| FPGA | 2 |"
+        segments = pipeline.split_markdown_for_enhancement(body, max_chars=1000)
+        self.assertTrue(segments)
+        self.assertFalse(any(eligible for _, eligible in segments))
+
+    def test_fenced_code_with_blank_lines_is_protected(self):
+        body = "```python\nvalue = 12\n\nprint(value)\n```"
+        segments = pipeline.split_markdown_for_enhancement(body, max_chars=1000)
+        self.assertEqual(segments, [(body, False)])
+
+    def test_numeric_change_fails_safety_validation(self):
+        valid, reason = pipeline.validate_enhanced_markdown(
+            "Revenue was 1200 in 2026.", "## Revenue\n\nRevenue was 1250 in 2026."
+        )
+        self.assertFalse(valid)
+        self.assertIn("不一致", reason)
+
+    def test_rewritten_text_fails_safety_validation(self):
+        source = "The controller validates each document and preserves the original technical content."
+        enhanced = "The assistant invents a completely different summary with unrelated operational guidance."
+        valid, reason = pipeline.validate_enhanced_markdown(source, enhanced)
+        self.assertFalse(valid)
+        self.assertIn("文字內容", reason)
+
+    def test_document_enhancement_preserves_frontmatter_and_tables(self):
+        class FakeClient:
+            def enhance_markdown(self, markdown, chunk_index, chunk_count):
+                return markdown.replace("# Weekly report", "# Weekly Report")
+
+        factory = SimpleNamespace(get=lambda: FakeClient())
+        source = (
+            '---\noriginal_file: "report.md"\n---\n\n'
+            "# Weekly report\n\nCompleted in 2026.\n\n"
+            "| Name | Value |\n| --- | --- |\n| Clock | 100 MHz |\n"
+        )
+        enhanced, requests, warnings = pipeline.enhance_markdown_document(source, factory)
+        self.assertTrue(enhanced.startswith('---\noriginal_file: "report.md"\n---\n\n'))
+        self.assertIn("# Weekly Report", enhanced)
+        self.assertIn("| Clock | 100 MHz |", enhanced)
+        self.assertEqual(requests, 1)
+        self.assertFalse(warnings)
+
+    def test_unsafe_ai_result_falls_back_to_original(self):
+        class UnsafeClient:
+            def enhance_markdown(self, markdown, chunk_index, chunk_count):
+                return markdown.replace("2026", "2027")
+
+        factory = SimpleNamespace(get=lambda: UnsafeClient())
+        source = '---\noriginal_file: "report.md"\n---\n\n# Report\n\nCompleted in 2026.\n'
+        enhanced, requests, warnings = pipeline.enhance_markdown_document(source, factory)
+        self.assertIn("2026", enhanced)
+        self.assertNotIn("2027", enhanced)
+        self.assertEqual(requests, 1)
+        self.assertEqual(len(warnings), 1)
 
 
 if __name__ == "__main__":

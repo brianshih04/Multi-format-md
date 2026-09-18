@@ -20,6 +20,7 @@ GUI 必須提供：
 - 檔案與資料夾選擇器、移除與清空操作。
 - 八種來源格式的個別篩選。
 - 輸出目錄與輸出格式選擇。
+- `hybrid` 與 `ai-enhanced` 轉換模式選擇。
 - 工作執行緒數與強制重跑設定。
 - 遮罩式 API Key 輸入，不由 GUI 自動儲存。
 - 可編輯的 OpenAI-compatible Base URL。
@@ -47,6 +48,8 @@ Windows 交付包含環境安裝腳本、雙擊啟動批次檔與 PyInstaller �
 
 HTTP 429、5xx、連線與逾時錯誤使用指數退避，最多嘗試五次。API Key 從本次 GUI 輸入、`DEEPSEEK_API_KEY` 環境變數或本機 `.env` 取得，不可寫入日誌或 Manifest。
 
+`ai-enhanced` 模式在標準轉換後，將非表格 Markdown 分段交給所選模型整理標題、段落與清單。Markdown 表格及 code fence 不送往文字整理；模型結果必須通過數值、URL、Email、識別碼與內容長度驗證，否則保留原文並記錄警告。YAML frontmatter 不得送交模型或被改寫。
+
 ## 5. 增量處理
 
 輸出根目錄維護 `.conversion_manifest.json`。每個來源項目至少記錄：
@@ -61,7 +64,8 @@ HTTP 429、5xx、連線與逾時錯誤使用指數退避，最多嘗試五次。
     "status": "success",
     "model": "deepseek-flash",
     "base_url": "https://api.deepseek.com",
-    "output_format": "md"
+    "output_format": "md",
+    "processing_mode": "hybrid"
   }
 }
 ```
@@ -70,7 +74,7 @@ HTTP 429、5xx、連線與逾時錯誤使用指數退避，最多嘗試五次。
 
 1. `mtime`、輸出位置、模型、端點與格式未變，且成功輸出仍存在：直接略過。
 2. `mtime` 改變：計算 SHA-256；內容相同時只更新 `mtime`。
-3. 內容、模型、端點或輸出格式改變，輸出遺失，前次失敗，或指定 `--force`：重新處理。
+3. 內容、模型、端點、轉換模式或輸出格式改變，輸出遺失，前次失敗，或指定 `--force`：重新處理。
 4. Manifest 與輸出檔使用原子寫入；每完成一檔立即更新狀態。
 
 ## 6. 可靠性與回報
@@ -85,6 +89,7 @@ HTTP 429、5xx、連線與逾時錯誤使用指數退避，最多嘗試五次。
 - 第一次處理全部來源；第二次未改動時全部快速略過；修改單一來源後只重做該檔。
 - 修改檔案 `mtime` 但內容未變時，不重送 VLM。
 - 切換模型、Base URL 或輸出格式時重新產生內容。
+- 切換 hybrid / ai-enhanced 時重新產生內容；不安全的 AI 整理結果自動退回原文。
 - 巢狀目錄結構在輸出端保持一致。
 - TXT、PDF、DOCX、XLSX、PPTX 解析有自動測試；DOC、XLS、PPT 會在偵測到 LibreOffice 時執行真實往返整合測試。
 - GUI 可在 Windows 11 啟動，拖放可用，模型清單查詢在背景執行。

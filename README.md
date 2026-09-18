@@ -10,6 +10,7 @@
 - Windows GUI 支援拖放多個檔案或資料夾。
 - 可設定 API Key、Base URL、輸入格式、輸出格式、模型與並行數。
 - 自動呼叫目前端點的 `/models` API，讓使用者從實際可用模型中選擇。
+- 可選 `ai-enhanced` 模式，在精確解析後由模型整理標題、段落與清單。
 - 支援 Markdown、純文字與 JSON 輸出。
 - 遞迴掃描並保留原始子資料夾結構。
 - 使用 `mtime` 與 SHA-256 Manifest 進行增量更新。
@@ -51,10 +52,10 @@ powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 
 1. 將文件或資料夾拖放到輸入區，也可使用「選擇檔案」或「選擇資料夾」。
 2. 勾選需要處理的來源格式。
-3. 選擇輸出目錄及 `Markdown`、`TXT` 或 `JSON` 格式。
+3. 選擇輸出目錄、輸出格式與轉換模式。
 4. 輸入 API Key 與 Base URL。
 5. 按「查詢模型」，或展開模型選單，自動取得端點目前提供的模型。
-6. 選擇支援 Vision 的模型後按「開始轉換」。
+6. 選擇模型後按「開始轉換」。
 
 預設 DeepSeek 設定：
 
@@ -63,7 +64,14 @@ Base URL: https://api.deepseek.com
 Model:    deepseek-flash
 ```
 
-API Key 欄位使用遮罩顯示，GUI 不會自行儲存輸入內容。只有文件包含需要視覺分析的內容時才會發送圖片請求；純文字及一般 Excel 文件可在不呼叫 VLM 的情況下完成。
+API Key 欄位使用遮罩顯示，GUI 不會自行儲存輸入內容。在預設 `hybrid` 模式下，只有需要視覺分析的內容會發送圖片請求；`ai-enhanced` 模式則會另外把擷取後的非表格文字分段傳送到 API。
+
+### 轉換模式
+
+- `hybrid`（預設）：本機提取文字與表格，只有圖片、掃描頁、圖表及完整投影片視圖交給 Vision API。
+- `ai-enhanced`：完成 hybrid 流程後，再由所選模型整理 Markdown 的標題層級、段落與清單。Markdown 表格及 code fence 保持原樣；若數值、URL、Email、識別碼或內容長度驗證失敗，該段自動退回原文並記錄警告。
+
+AI Enhanced 以約 24,000 字元分段處理，因此一份大型文件可能產生多次文字 API 請求。它不會摘要或刻意縮短內容，但模型服務仍可能看到文件中的文字資料。
 
 ## CLI 使用方式
 
@@ -75,6 +83,7 @@ Windows PowerShell：
   --output-dir "C:\Documents\anythingllm" `
   --workers 4 `
   --output-format md `
+  --processing-mode hybrid `
   --base-url "https://api.deepseek.com" `
   --model "deepseek-flash"
 ```
@@ -87,6 +96,7 @@ Windows PowerShell：
 | `--output-dir` | 轉換結果、Manifest 與錯誤記錄的輸出目錄 |
 | `--workers` | 並行處理數，預設為 `4` |
 | `--output-format` | `md`、`txt` 或 `json`，預設為 `md` |
+| `--processing-mode` | `hybrid` 或 `ai-enhanced`，預設為 `hybrid` |
 | `--model` | Vision 模型 ID，預設為 `deepseek-flash` |
 | `--base-url` | OpenAI-compatible API Base URL |
 | `--force` | 忽略 Manifest 並重新處理所有文件 |
@@ -106,7 +116,7 @@ Windows PowerShell：
 
 1. 修改時間、成功狀態、模型、端點、格式與輸出位置都相同：直接略過，不重新計算雜湊。
 2. 只有修改時間改變：計算 SHA-256；內容相同時只更新 Manifest。
-3. 內容、模型、Base URL 或輸出格式改變，或輸出遺失、前次失敗：重新轉換。
+3. 內容、模型、Base URL、轉換模式或輸出格式改變，或輸出遺失、前次失敗：重新轉換。
 4. 每完成一份文件就原子更新 Manifest，意外中止時仍保留已完成進度。
 
 同一目錄若有 `report.pdf` 與 `report.docx`，輸出會自動使用 `report.pdf.md` 與 `report.docx.md`，避免覆寫。
@@ -120,15 +130,16 @@ Markdown 會包含來源追蹤資訊：
 original_file: "hardware/soc_spec.pdf"
 converted_date: "2026-09-18T10:00:00Z"
 model: "deepseek-flash"
+processing_mode: "hybrid"
 ---
 ```
 
-錯誤與非致命警告會寫入輸出目錄的 `conversion_error.log`。CLI 與 GUI 都會顯示掃描、略過、成功、失敗及 VLM 圖片請求數。
+錯誤與非致命警告會寫入輸出目錄的 `conversion_error.log`。CLI 與 GUI 都會顯示掃描、略過、成功、失敗、VLM 圖片請求數及 AI 整理請求數。
 
 ## 隱私與憑證
 
 - 文件解析在本機執行。
-- 只有擷取出的視覺內容會傳送到使用者設定的 API 端點。
+- `hybrid` 模式只傳送擷取出的視覺內容；`ai-enhanced` 會另外傳送擷取後的非表格文字。
 - API Key 不會寫入 Markdown、Manifest 或錯誤日誌。
 - `.env`、本機測試輸出、虛擬環境與打包產物均由 `.gitignore` 排除。
 - 請勿把含公司或個人資料的轉換輸出提交到公開儲存庫。
@@ -146,6 +157,7 @@ model: "deepseek-flash"
 - 同名來源的輸出防碰撞。
 - PDF、DOCX、XLSX、PPTX、TXT 解析。
 - 模型清單查詢與 JSON 輸出。
+- AI Enhanced 分段、表格保護、數值驗證與不安全結果回退。
 - LibreOffice 可用時，實際執行 DOC、XLS、PPT 往返整合測試。
 
 ## 專案結構

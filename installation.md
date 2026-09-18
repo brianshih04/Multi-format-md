@@ -167,11 +167,11 @@ GUI 啟動後：
 
 1. 加入檔案或資料夾。
 2. 選擇輸入格式與輸出格式。
-3. 設定輸出資料夾。
-4. 輸入 API Key 與 Base URL。
-5. 按「查詢模型」取得 `/models` 清單。
-6. 選擇支援 Vision 的模型。
-7. 按「開始轉換」。
+3. 選擇 `hybrid` 或 `ai-enhanced` 轉換模式。
+4. 設定輸出資料夾。
+5. 輸入 API Key 與 Base URL。
+6. 按「查詢模型」取得 `/models` 清單。
+7. 選擇模型並按「開始轉換」。
 
 若相容端點未實作 `/models`，模型欄位仍可手動輸入。
 
@@ -184,7 +184,8 @@ GUI 啟動後：
   --input-dir "C:\Documents\raw" `
   --output-dir "C:\Documents\markdown" `
   --workers 4 `
-  --output-format md
+  --output-format md `
+  --processing-mode hybrid
 ```
 
 指定相容端點與模型：
@@ -194,7 +195,8 @@ GUI 啟動後：
   --input-dir "C:\Documents\raw" `
   --output-dir "C:\Documents\markdown" `
   --base-url "https://api.deepseek.com" `
-  --model "deepseek-flash"
+  --model "deepseek-flash" `
+  --processing-mode ai-enhanced
 ```
 
 輸出格式：
@@ -202,6 +204,13 @@ GUI 啟動後：
 - `md`：含 YAML frontmatter 的 Markdown，建議用於 AnythingLLM。
 - `txt`：文字檔，正文保留可讀的 Markdown 表格結構。
 - `json`：來源中繼資料與 `content_markdown` 欄位。
+
+處理模式：
+
+- `hybrid`：預設模式。本機解析文字與表格，只有視覺內容送往 API。
+- `ai-enhanced`：在 hybrid 轉換後，把非表格 Markdown 分段交由模型整理。此模式需要 API Key，會增加文字 Token 費用，並會把文件文字傳送到目前設定的端點。
+
+AI Enhanced 會保護 Markdown 表格與 code fence，並檢查數值、URL、Email、識別碼及內容長度；未通過安全檢查的段落會保留原文。處理結果與請求數會顯示於執行摘要，警告則寫入 `conversion_error.log`。
 
 ## 9. 建立 Windows 應用程式
 
@@ -265,7 +274,7 @@ powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 
 ### 出現「未設定 DEEPSEEK_API_KEY」
 
-文件包含視覺內容，但目前程序沒有 API Key。請在 GUI 輸入，或設定 `.env`／環境變數後重試。
+文件包含視覺內容或選擇了 AI Enhanced，但目前程序沒有 API Key。請在 GUI 輸入，或設定 `.env`／環境變數後重試。
 
 ### 為什麼沒有 VLM 請求
 

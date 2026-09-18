@@ -32,14 +32,18 @@ FORMAT_LABELS = {
     "純文字 (.txt)": "txt",
     "JSON (.json)": "json",
 }
+MODE_LABELS = {
+    "Hybrid（本機解析，圖片使用 AI）": "hybrid",
+    "AI Enhanced（轉換後再由 AI 整理）": "ai-enhanced",
+}
 
 
 class ConverterApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Multi-Format to Markdown Pipeline")
-        self.root.geometry("940x780")
-        self.root.minsize(800, 680)
+        self.root.geometry("960x850")
+        self.root.minsize(820, 740)
         self.selected_paths: list[Path] = []
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.running = False
@@ -51,6 +55,7 @@ class ConverterApp:
         self.base_url = tk.StringVar(value=os.environ.get("DEEPSEEK_BASE_URL", pipeline.DEFAULT_BASE_URL))
         self.model = tk.StringVar(value=os.environ.get("DEEPSEEK_MODEL", pipeline.DEFAULT_MODEL))
         self.output_format = tk.StringVar(value="Markdown (.md)")
+        self.processing_mode = tk.StringVar(value=next(iter(MODE_LABELS)))
         self.workers = tk.IntVar(value=min(4, max(1, os.cpu_count() or 1)))
         self.force = tk.BooleanVar(value=False)
         self.show_key = tk.BooleanVar(value=False)
@@ -136,8 +141,22 @@ class ConverterApp:
             row=1, column=3, sticky="w", pady=(10, 0)
         )
 
+        ttk.Label(filter_frame, text="轉換模式：").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Combobox(
+            filter_frame,
+            textvariable=self.processing_mode,
+            values=list(MODE_LABELS),
+            state="readonly",
+            width=38,
+        ).grid(row=2, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(
+            filter_frame,
+            text="AI Enhanced 會把擷取後的文字分段傳送到 API；數值驗證失敗時自動保留原文。",
+            style="Hint.TLabel",
+        ).grid(row=3, column=1, columnspan=3, sticky="w", pady=(2, 0))
+
         output_frame = ttk.Frame(filter_frame)
-        output_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        output_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         output_frame.columnconfigure(1, weight=1)
         ttk.Label(output_frame, text="輸出目錄：").grid(row=0, column=0, sticky="w")
         ttk.Entry(output_frame, textvariable=self.output_dir).grid(row=0, column=1, sticky="ew", padx=6)
@@ -325,6 +344,12 @@ class ConverterApp:
         if not self.base_url.get().strip() or not self.model.get().strip():
             messagebox.showerror("API 設定不完整", "Base URL 與模型不可空白。")
             return
+        processing_mode = MODE_LABELS[self.processing_mode.get()]
+        if processing_mode == "ai-enhanced" and not (
+            self.api_key.get().strip() or os.environ.get("DEEPSEEK_API_KEY")
+        ):
+            messagebox.showerror("缺少 API Key", "AI Enhanced 模式需要 API Key。")
+            return
         try:
             workers = int(self.workers.get())
             if workers < 1:
@@ -340,6 +365,7 @@ class ConverterApp:
             model=self.model.get().strip(),
             base_url=self.base_url.get().strip().rstrip("/"),
             output_format=FORMAT_LABELS[self.output_format.get()],
+            processing_mode=processing_mode,
             api_key=self.api_key.get().strip() or None,
         )
         paths = list(self.selected_paths)
@@ -348,7 +374,7 @@ class ConverterApp:
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
         self.status.set("掃描與轉換中…")
-        self._append_log(f"開始處理 {len(paths)} 個選取項目。")
+        self._append_log(f"開始處理 {len(paths)} 個選取項目；模式：{processing_mode}。")
         threading.Thread(
             target=self._run_worker,
             args=(args, paths, extensions),
@@ -394,7 +420,8 @@ class ConverterApp:
                     self.progress["value"] = self.progress["maximum"]
                     self.status.set("完成" if exit_code == 0 else "完成，但有檔案失敗")
                     self._append_log(
-                        "摘要：掃描 {total}、略過 {skipped}、成功 {converted}、失敗 {failed}、VLM 請求 {image_requests}".format(
+                        "摘要：掃描 {total}、略過 {skipped}、成功 {converted}、失敗 {failed}、"
+                        "VLM 圖片請求 {image_requests}、AI 整理請求 {enhancement_requests}".format(
                             **summary
                         )
                     )
