@@ -86,7 +86,7 @@ HTTP 429、5xx、連線與逾時錯誤使用指數退避，最多嘗試五次。
 - 修改檔案 `mtime` 但內容未變時，不重送 VLM。
 - 切換模型、Base URL 或輸出格式時重新產生內容。
 - 巢狀目錄結構在輸出端保持一致。
-- TXT、PDF、DOCX、XLSX、PPTX 解析有自動測試；舊版 Office 格式在安裝 LibreOffice 的 Windows 環境驗證。
+- TXT、PDF、DOCX、XLSX、PPTX 解析有自動測試；DOC、XLS、PPT 會在偵測到 LibreOffice 時執行真實往返整合測試。
 - GUI 可在 Windows 11 啟動，拖放可用，模型清單查詢在背景執行。
 
 ## 8. 交付內容

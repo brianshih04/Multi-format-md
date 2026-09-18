@@ -204,6 +204,52 @@ class ModernFormatParserTests(unittest.TestCase):
             self.assertIn("Native PDF text", text)
 
 
+@unittest.skipUnless(pipeline.find_soffice(), "LibreOffice is required for legacy Office tests")
+class LegacyOfficeIntegrationTests(unittest.TestCase):
+    def test_legacy_doc_round_trip(self):
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            modern = root / "legacy-source.docx"
+            document = Document()
+            document.add_paragraph("Legacy DOC marker")
+            document.save(modern)
+            legacy = pipeline.libreoffice_convert(modern, ".doc", root / "legacy")
+            result = pipeline.extract_document(legacy)
+            text = "\n".join(str(part.content) for part in result.parts if part.kind == "text")
+            self.assertIn("Legacy DOC marker", text)
+
+    def test_legacy_xls_round_trip(self):
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            modern = root / "legacy-source.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["Legacy XLS marker", 42])
+            workbook.save(modern)
+            legacy = pipeline.libreoffice_convert(modern, ".xls", root / "legacy")
+            result = pipeline.extract_document(legacy)
+            text = "\n".join(str(part.content) for part in result.parts if part.kind == "text")
+            self.assertIn("Legacy XLS marker", text)
+
+    def test_legacy_ppt_round_trip(self):
+        from pptx import Presentation
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            modern = root / "legacy-source.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[0])
+            slide.shapes.title.text = "Legacy PPT marker"
+            presentation.save(modern)
+            legacy = pipeline.libreoffice_convert(modern, ".ppt", root / "legacy")
+            result = pipeline.extract_document(legacy)
+            text = "\n".join(str(part.content) for part in result.parts if part.kind == "text")
+            self.assertIn("Legacy PPT marker", text)
+
+
 class OutputAndApiTests(unittest.TestCase):
     def test_json_output_contains_markdown_body(self):
         markdown = '---\noriginal_file: "a.txt"\n---\n\n# Hello\n'

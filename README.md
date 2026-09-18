@@ -142,7 +142,7 @@ model: "deepseek-flash"
 python -m unittest discover -s tests -v
 ```
 
-測試涵蓋首次處理、`mtime` 快速略過、雜湊略過、內容變更、輸出遺失、強制處理及同名輸出防碰撞。
+測試涵蓋首次處理、`mtime` 快速略過、雜湊略過、內容變更、輸出遺失、強制處理、同名輸出防碰撞，以及 PDF、DOCX、XLSX、PPTX 解析。若偵測到 LibreOffice，還會實際執行 DOC、XLS、PPT 產生與回讀的往返整合測試；未安裝時只略過這三項。
 
 ## 建立 Windows 應用程式
 
