@@ -160,6 +160,18 @@ processing_mode: "hybrid"
 - AI Enhanced 分段、表格保護、數值驗證與不安全結果回退。
 - LibreOffice 可用時，實際執行 DOC、XLS、PPT 往返整合測試。
 
+### Windows 11 實機驗證
+
+2026-09-18 使用一組實際週報資料執行端對端驗證：
+
+- 來源共 12 份文件（3 個 DOCX、9 個 XLSX），全部成功轉換，失敗、警告及圖片請求皆為 0。
+- `ai-enhanced` 使用 `deepseek-flash` 產生 4 次非表格文字整理請求：3 次來自 DOCX 段落，另 1 次來自 XLSX 的「工作表標題＋空白工作表」標記；Markdown 表格全程保留在本機處理。
+- 空白工作表標記經 AI 處理後沒有內容變化；這項實測數據用於辨識後續可減少的不必要請求。
+- 產生 12 份含正確 frontmatter 的 Markdown，Manifest 也包含 12 筆成功狀態。
+- 未修改來源直接執行第二次時，12 份全部由 Manifest 略過，AI 請求數為 0。
+
+實際測試文件、轉換結果、API Key 與內部路徑均不納入公開儲存庫。
+
 ## 專案結構
 
 ```text

@@ -212,6 +212,24 @@ GUI 啟動後：
 
 AI Enhanced 會保護 Markdown 表格與 code fence，並檢查數值、URL、Email、識別碼及內容長度；未通過安全檢查的段落會保留原文。處理結果與請求數會顯示於執行摘要，警告則寫入 `conversion_error.log`。
 
+### 建議的正式資料驗收流程
+
+在獲得文件擁有者同意後，先選一個小型代表性資料夾執行：
+
+```powershell
+.\.venv\Scripts\python.exe .\doc_to_md_pipeline.py `
+  --input-dir "C:\Documents\sample" `
+  --output-dir "C:\Documents\sample_md" `
+  --processing-mode ai-enhanced `
+  --base-url "https://api.deepseek.com" `
+  --model "deepseek-flash" `
+  --force
+```
+
+確認第一次執行的成功數、失敗數、AI 整理請求數及 `conversion_error.log`。接著移除 `--force` 再執行同一指令；若來源未改變，所有文件應由 Manifest 略過，AI 整理請求數應為 0。
+
+Windows 11 實機驗證曾以 12 份文件（3 個 DOCX、9 個 XLSX）執行：首次 12 份成功並產生 4 次 AI 文字請求，其中 3 次為 DOCX 段落，1 次為 XLSX 的空白工作表標記；第二次 12 份全部略過且沒有新 API 請求。空白工作表標記的回傳內容沒有變化。測試資料及轉換結果不應提交至公開儲存庫。
+
 ## 9. 建立 Windows 應用程式
 
 執行：
